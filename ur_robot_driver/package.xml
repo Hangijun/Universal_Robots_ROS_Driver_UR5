@@ -50,7 +50,6 @@
   <exec_depend>force_torque_sensor_controller</exec_depend>
   <exec_depend>industrial_robot_status_controller</exec_depend>
   <exec_depend>joint_state_controller</exec_depend>
-  <exec_depend>forward_cartesian_traj_controller</exec_depend>
   <exec_depend>joint_trajectory_controller</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>socat</exec_depend>
