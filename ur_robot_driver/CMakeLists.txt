@@ -40,6 +40,7 @@ find_package(catkin REQUIRED
     ur_msgs
     pass_through_controllers
     kdl_parser
+    ur_ros_cartesian_control
 )
 find_package(Boost REQUIRED)
 find_package(ur_client_library REQUIRED)
