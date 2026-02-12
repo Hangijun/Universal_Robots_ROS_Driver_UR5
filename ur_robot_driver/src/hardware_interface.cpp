@@ -1345,7 +1345,7 @@ void HardwareInterface::startCartesianInterpolation(const hardware_interface::Ca
     p[3] = rot.GetRot().x();
     p[4] = rot.GetRot().y();
     p[5] = rot.GetRot().z();
-    double next_time = point.time_from_start.toSec();
+    double next_time = point.time_from_start.toSec() * (i + 1) / point_number;
     ur_driver_->writeTrajectoryPoint(p, true, next_time - last_time);
     last_time = next_time;
   }
