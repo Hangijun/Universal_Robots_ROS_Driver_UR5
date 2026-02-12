@@ -1329,7 +1329,13 @@ void HardwareInterface::startCartesianInterpolation(const hardware_interface::Ca
   size_t point_number = trajectory.trajectory.points.size();
   ROS_DEBUG("Starting cartesian trajectory forward");
   ur_driver_->writeTrajectoryControlMessage(urcl::control::TrajectoryControlMessage::TRAJECTORY_START, point_number);
+
   double last_time = 0.0;
+
+  // [추가] 연속성을 유지하기 위한 변수 선언
+  KDL::Rotation prev_rot_mat;      // 이전 루프의 회전 행렬
+  KDL::Vector accumulated_rot_vec; // 누적된(Unwrapped) 회전 벡터
+
   for (size_t i = 0; i < point_number; i++)
   {
     cartesian_control_msgs::CartesianTrajectoryPoint point = trajectory.trajectory.points[i];
@@ -1338,13 +1344,45 @@ void HardwareInterface::startCartesianInterpolation(const hardware_interface::Ca
     p[1] = point.pose.position.y;
     p[2] = point.pose.position.z;
 
-    KDL::Rotation rot = KDL::Rotation::Quaternion(point.pose.orientation.x, point.pose.orientation.y,
-                                                  point.pose.orientation.z, point.pose.orientation.w);
+    // 1. 현재 메시지의 쿼터니언을 KDL 회전 행렬로 변환
+    KDL::Rotation current_rot_mat = KDL::Rotation::Quaternion(
+        point.pose.orientation.x, point.pose.orientation.y,
+        point.pose.orientation.z, point.pose.orientation.w);
+
+    if (i == 0)
+    {
+        // [초기화] 첫 번째 점은 기본(Canonical) 회전 벡터로 초기화합니다.
+        // GetRot()은 기본적으로 -pi ~ pi 사이의 값을 반환합니다.
+        accumulated_rot_vec = current_rot_mat.GetRot();
+    }
+    else
+    {
+        // [핵심 로직] Unwrapping 수행
+        // 절대적인 각도를 변환하는 대신, "이전 자세에서 얼마나 더 돌았는지(Delta)"를 계산하여 더합니다.
+        
+        // Diff = Current * Previous_Inverse (전역 좌표계 기준 회전 차이 계산)
+        // 수식: R_diff = R_curr * R_prev^T
+        KDL::Rotation rot_diff = current_rot_mat * prev_rot_mat.Inverse();
+
+        // 차이 행렬을 회전 벡터(Axis-Angle)로 변환
+        // trajectory의 점들은 서로 가깝기 때문에, 이 diff_vec의 크기는 항상 작습니다 (pi를 넘지 않음).
+        // 따라서 KDL의 각도 축소 문제가 발생하지 않습니다.
+        KDL::Vector diff_vec = rot_diff.GetRot();
+
+        // 누적 벡터에 차이 벡터를 더합니다.
+        // 예: 기존 179도에서 +2도 회전하면, 181도 크기를 가진 벡터가 됩니다.
+        accumulated_rot_vec = accumulated_rot_vec + diff_vec;
+    }
+
+    // 다음 루프를 위해 현재 회전 행렬을 저장
+    prev_rot_mat = current_rot_mat;
 
     // UR robots use axis angle representation.
-    p[3] = rot.GetRot().x();
-    p[4] = rot.GetRot().y();
-    p[5] = rot.GetRot().z();
+    // [변경] 단순 변환된 rot.GetRot() 대신 누적된 accumulated_rot_vec을 사용
+    p[3] = accumulated_rot_vec.x();
+    p[4] = accumulated_rot_vec.y();
+    p[5] = accumulated_rot_vec.z();
+
     double next_time = point.time_from_start.toSec() * (i + 1) / point_number;
     ur_driver_->writeTrajectoryPoint(p, true, next_time - last_time);
     last_time = next_time;
