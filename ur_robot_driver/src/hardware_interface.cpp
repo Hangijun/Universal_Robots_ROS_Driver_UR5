@@ -1332,9 +1332,8 @@ void HardwareInterface::startCartesianInterpolation(const hardware_interface::Ca
 
   double last_time = 0.0;
 
-  // [추가] 연속성을 유지하기 위한 변수 선언
-  KDL::Rotation prev_rot_mat;      // 이전 루프의 회전 행렬
-  KDL::Vector accumulated_rot_vec; // 누적된(Unwrapped) 회전 벡터
+  // 연속성을 유지하기 위한 이전 회전 벡터 저장 변수
+  KDL::Vector accumulated_rot_vec;
 
   for (size_t i = 0; i < point_number; i++)
   {
@@ -1344,41 +1343,60 @@ void HardwareInterface::startCartesianInterpolation(const hardware_interface::Ca
     p[1] = point.pose.position.y;
     p[2] = point.pose.position.z;
 
-    // 1. 현재 메시지의 쿼터니언을 KDL 회전 행렬로 변환
+    // 1. 쿼터니언을 KDL 회전 행렬로 변환
     KDL::Rotation current_rot_mat = KDL::Rotation::Quaternion(
         point.pose.orientation.x, point.pose.orientation.y,
         point.pose.orientation.z, point.pose.orientation.w);
 
+    // 2. KDL 기본 함수로 -pi ~ pi 범위의 Raw 회전 벡터 추출 (축 * 각도)
+    KDL::Vector v_raw = current_rot_mat.GetRot();
+
     if (i == 0)
     {
-        // [초기화] 첫 번째 점은 기본(Canonical) 회전 벡터로 초기화합니다.
-        // GetRot()은 기본적으로 -pi ~ pi 사이의 값을 반환합니다.
-        accumulated_rot_vec = current_rot_mat.GetRot();
+        // 첫 번째 포인트는 Raw 벡터를 그대로 사용
+        accumulated_rot_vec = v_raw;
     }
     else
     {
-        // [핵심 로직] Unwrapping 수행
-        // 절대적인 각도를 변환하는 대신, "이전 자세에서 얼마나 더 돌았는지(Delta)"를 계산하여 더합니다.
-        
-        // Diff = Current * Previous_Inverse (전역 좌표계 기준 회전 차이 계산)
-        // 수식: R_diff = R_curr * R_prev^T
-        KDL::Rotation rot_diff = current_rot_mat * prev_rot_mat.Inverse();
+        // [수정된 핵심 로직: Nearest Equivalent Rotation Vector]
+        double theta = v_raw.Norm(); // 회전 각도 (0 ~ pi)
+        KDL::Vector v_new = v_raw;
 
-        // 차이 행렬을 회전 벡터(Axis-Angle)로 변환
-        // trajectory의 점들은 서로 가깝기 때문에, 이 diff_vec의 크기는 항상 작습니다 (pi를 넘지 않음).
-        // 따라서 KDL의 각도 축소 문제가 발생하지 않습니다.
-        KDL::Vector diff_vec = rot_diff.GetRot();
+        if (theta > 1e-5) // 회전이 거의 0인 경우(Singularity) 제외
+        {
+            KDL::Vector axis = v_raw / theta; // 정규화된 회전 축
+            
+            double min_dist = 1e9;
+            int best_k = 0;
 
-        // 누적 벡터에 차이 벡터를 더합니다.
-        // 예: 기존 179도에서 +2도 회전하면, 181도 크기를 가진 벡터가 됩니다.
-        accumulated_rot_vec = accumulated_rot_vec + diff_vec;
+            // v_raw와 물리적으로 동일한 자세를 만드는 회전 벡터들 (..., -2pi, 0, +2pi, ...) 
+            // 중 이전 자세(accumulated_rot_vec)와 가장 거리가 짧은 것을 찾습니다.
+            for (int k = -3; k <= 3; ++k) 
+            {
+                // candidate = (theta + 2*pi*k) * axis
+                KDL::Vector candidate = v_raw + axis * (k * 2.0 * M_PI);
+                double dist = (candidate - accumulated_rot_vec).Norm();
+                
+                if (dist < min_dist)
+                {
+                    min_dist = dist;
+                    best_k = k;
+                }
+            }
+            // 가장 연속적인 회전 벡터로 확정
+            v_new = v_raw + axis * (best_k * 2.0 * M_PI);
+        }
+        else
+        {
+            // 회전이 0에 수렴할 때는 이전 벡터의 크기(2*pi 단위)만 유지해 줍니다.
+            // (특이점 보정)
+            v_new = accumulated_rot_vec; 
+        }
+
+        accumulated_rot_vec = v_new;
     }
 
-    // 다음 루프를 위해 현재 회전 행렬을 저장
-    prev_rot_mat = current_rot_mat;
-
-    // UR robots use axis angle representation.
-    // [변경] 단순 변환된 rot.GetRot() 대신 누적된 accumulated_rot_vec을 사용
+    // UR 로봇에 전달할 배열에 저장
     p[3] = accumulated_rot_vec.x();
     p[4] = accumulated_rot_vec.y();
     p[5] = accumulated_rot_vec.z();
