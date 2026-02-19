@@ -1332,8 +1332,9 @@ void HardwareInterface::startCartesianInterpolation(const hardware_interface::Ca
 
   double last_time = 0.0;
 
-  // 연속성을 유지하기 위한 이전 회전 벡터 저장 변수
+  // 연속성 유지를 위한 변수
   KDL::Vector accumulated_rot_vec;
+  KDL::Rotation prev_rot_mat;
 
   for (size_t i = 0; i < point_number; i++)
   {
@@ -1343,60 +1344,71 @@ void HardwareInterface::startCartesianInterpolation(const hardware_interface::Ca
     p[1] = point.pose.position.y;
     p[2] = point.pose.position.z;
 
-    // 1. 쿼터니언을 KDL 회전 행렬로 변환
+    // 1. 현재 목표 자세의 쿼터니언을 KDL 회전 행렬로 변환
     KDL::Rotation current_rot_mat = KDL::Rotation::Quaternion(
         point.pose.orientation.x, point.pose.orientation.y,
         point.pose.orientation.z, point.pose.orientation.w);
 
-    // 2. KDL 기본 함수로 -pi ~ pi 범위의 Raw 회전 벡터 추출 (축 * 각도)
-    KDL::Vector v_raw = current_rot_mat.GetRot();
+    KDL::Vector v_raw = current_rot_mat.GetRot(); // 0 ~ pi 범위의 회전 벡터
 
     if (i == 0)
     {
-        // 첫 번째 포인트는 Raw 벡터를 그대로 사용
+        // 첫 번째 점은 초기 회전 벡터를 그대로 사용
         accumulated_rot_vec = v_raw;
     }
     else
     {
-        // [수정된 핵심 로직: Nearest Equivalent Rotation Vector]
-        double theta = v_raw.Norm(); // 회전 각도 (0 ~ pi)
-        KDL::Vector v_new = v_raw;
+        double theta = v_raw.Norm();
+        KDL::Vector axis;
 
-        if (theta > 1e-5) // 회전이 거의 0인 경우(Singularity) 제외
-        {
-            KDL::Vector axis = v_raw / theta; // 정규화된 회전 축
-            
-            double min_dist = 1e9;
-            int best_k = 0;
+        if (theta > 1e-4) {
+            axis = v_raw / theta;
+        } else {
+            axis = KDL::Vector(0, 0, 1); // fallback
+        }
 
-            // v_raw와 물리적으로 동일한 자세를 만드는 회전 벡터들 (..., -2pi, 0, +2pi, ...) 
-            // 중 이전 자세(accumulated_rot_vec)와 가장 거리가 짧은 것을 찾습니다.
-            for (int k = -3; k <= 3; ++k) 
-            {
-                // candidate = (theta + 2*pi*k) * axis
-                KDL::Vector candidate = v_raw + axis * (k * 2.0 * M_PI);
-                double dist = (candidate - accumulated_rot_vec).Norm();
-                
-                if (dist < min_dist)
-                {
-                    min_dist = dist;
-                    best_k = k;
-                }
+        // [특이점 방어 1단계] 
+        // 360도의 배수 근처(theta가 0에 근접)에서는 v_raw의 축이 노이즈로 인해 불안정해집니다.
+        // 이때 로봇이 이미 다회전 상태(Norm > 1.0)라면, 기존 회전 축을 강제로 유지시킵니다.
+        if (theta < 5e-2 && accumulated_rot_vec.Norm() > 1.0) {
+            axis = accumulated_rot_vec;
+            axis.Normalize();
+        }
+
+        double min_dist = 1e9;
+        KDL::Vector best_v = v_raw;
+
+        // [메인 로직] 오차 없이 정확한 다회전 벡터 찾기 (Drift 방지)
+        for (int k = -3; k <= 3; ++k) {
+            KDL::Vector candidate = v_raw + axis * (k * 2.0 * M_PI);
+            double dist = (candidate - accumulated_rot_vec).Norm();
+            if (dist < min_dist) {
+                min_dist = dist;
+                best_v = candidate;
             }
-            // 가장 연속적인 회전 벡터로 확정
-            v_new = v_raw + axis * (best_k * 2.0 * M_PI);
-        }
-        else
-        {
-            // 회전이 0에 수렴할 때는 이전 벡터의 크기(2*pi 단위)만 유지해 줍니다.
-            // (특이점 보정)
-            v_new = accumulated_rot_vec; 
         }
 
-        accumulated_rot_vec = v_new;
+        // [특이점 방어 2단계: Shock Absorber]
+        // 만약 수학적 한계로 인해 가장 가까운 후보조차 0.5 라디안(약 28도) 이상 튀어버린다면 (긴급 정지 원인),
+        // 절대 좌표 검색을 포기하고, 이전 자세에서 '각속도'만큼만 부드럽게 더해 특이점을 무사히 통과합니다.
+        if (min_dist > 0.5) {
+            // R_diff = 이전 회전 행렬의 역행렬 * 현재 회전 행렬 (매우 작은 변화량)
+            KDL::Rotation rot_diff = prev_rot_mat.Inverse() * current_rot_mat;
+            KDL::Vector omega_local = rot_diff.GetRot(); // 로컬 각속도
+            KDL::Vector omega_global = prev_rot_mat * omega_local; // 글로벌 각속도로 변환
+            
+            // 이전 회전 벡터에 연속적으로 더함
+            best_v = accumulated_rot_vec + omega_global; 
+            ROS_DEBUG_STREAM("Singularity jump avoided. Smoothed via angular velocity.");
+        }
+
+        accumulated_rot_vec = best_v;
     }
+    
+    // 다음 루프를 위해 현재 회전 행렬 저장
+    prev_rot_mat = current_rot_mat;
 
-    // UR 로봇에 전달할 배열에 저장
+    // UR 로봇에 전달
     p[3] = accumulated_rot_vec.x();
     p[4] = accumulated_rot_vec.y();
     p[5] = accumulated_rot_vec.z();
