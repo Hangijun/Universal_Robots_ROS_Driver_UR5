@@ -1329,11 +1329,11 @@ void HardwareInterface::startCartesianInterpolation(const hardware_interface::Ca
   size_t point_number = trajectory.trajectory.points.size();
   ROS_DEBUG("Starting cartesian trajectory forward");
   ur_driver_->writeTrajectoryControlMessage(urcl::control::TrajectoryControlMessage::TRAJECTORY_START, point_number);
-
+  
   double last_time = 0.0;
-
-  // 연속성을 유지하기 위한 이전 회전 벡터 저장 변수
-  KDL::Vector accumulated_rot_vec;
+  
+  // 기존의 복잡한 누적 변수(accumulated_rot_vec) 등은 필요 없습니다.
+  // Direct Pass-Through를 사용할 것이기 때문입니다.
 
   for (size_t i = 0; i < point_number; i++)
   {
@@ -1343,63 +1343,30 @@ void HardwareInterface::startCartesianInterpolation(const hardware_interface::Ca
     p[1] = point.pose.position.y;
     p[2] = point.pose.position.z;
 
-    // 1. 쿼터니언을 KDL 회전 행렬로 변환
-    KDL::Rotation current_rot_mat = KDL::Rotation::Quaternion(
-        point.pose.orientation.x, point.pose.orientation.y,
-        point.pose.orientation.z, point.pose.orientation.w);
-
-    // 2. KDL 기본 함수로 -pi ~ pi 범위의 Raw 회전 벡터 추출 (축 * 각도)
-    KDL::Vector v_raw = current_rot_mat.GetRot();
-
-    if (i == 0)
+    // [핵심 수정] Direct Pass-Through 모드 확인
+    // Python에서 약속한 대로 w가 -2.0이면 쿼터니언 변환을 하지 않고 raw data를 씁니다.
+    if (point.pose.orientation.w == -2.0) 
     {
-        // 첫 번째 포인트는 Raw 벡터를 그대로 사용
-        accumulated_rot_vec = v_raw;
+        // 1. 계산된 회전 벡터를 그대로 사용 (Pass-Through)
+        p[3] = point.pose.orientation.x;
+        p[4] = point.pose.orientation.y;
+        p[5] = point.pose.orientation.z;
     }
-    else
+    else 
     {
-        // [수정된 핵심 로직: Nearest Equivalent Rotation Vector]
-        double theta = v_raw.Norm(); // 회전 각도 (0 ~ pi)
-        KDL::Vector v_new = v_raw;
-
-        if (theta > 1e-5) // 회전이 거의 0인 경우(Singularity) 제외
-        {
-            KDL::Vector axis = v_raw / theta; // 정규화된 회전 축
+        // 2. 기존 방식 (일반적인 쿼터니언 입력이 들어올 경우를 대비한 하위 호환성)
+        // 만약 다른 노드에서 이 드라이버를 쓸 수도 있으므로 남겨둡니다.
+        KDL::Rotation rot = KDL::Rotation::Quaternion(
+            point.pose.orientation.x, point.pose.orientation.y,
+            point.pose.orientation.z, point.pose.orientation.w);
             
-            double min_dist = 1e9;
-            int best_k = 0;
-
-            // v_raw와 물리적으로 동일한 자세를 만드는 회전 벡터들 (..., -2pi, 0, +2pi, ...) 
-            // 중 이전 자세(accumulated_rot_vec)와 가장 거리가 짧은 것을 찾습니다.
-            for (int k = -3; k <= 3; ++k) 
-            {
-                // candidate = (theta + 2*pi*k) * axis
-                KDL::Vector candidate = v_raw + axis * (k * 2.0 * M_PI);
-                double dist = (candidate - accumulated_rot_vec).Norm();
-                
-                if (dist < min_dist)
-                {
-                    min_dist = dist;
-                    best_k = k;
-                }
-            }
-            // 가장 연속적인 회전 벡터로 확정
-            v_new = v_raw + axis * (best_k * 2.0 * M_PI);
-        }
-        else
-        {
-            // 회전이 0에 수렴할 때는 이전 벡터의 크기(2*pi 단위)만 유지해 줍니다.
-            // (특이점 보정)
-            v_new = accumulated_rot_vec; 
-        }
-
-        accumulated_rot_vec = v_new;
+        // 여기서는 기존의 단순 변환 또는 이전에 제안한 Nearest 방식을 유지
+        // (하지만 본 프로젝트에서는 w=-2.0을 쓸 것이므로 이 부분은 실행되지 않음)
+        KDL::Vector v = rot.GetRot();
+        p[3] = v.x();
+        p[4] = v.y();
+        p[5] = v.z();
     }
-
-    // UR 로봇에 전달할 배열에 저장
-    p[3] = accumulated_rot_vec.x();
-    p[4] = accumulated_rot_vec.y();
-    p[5] = accumulated_rot_vec.z();
 
     double next_time = point.time_from_start.toSec() * (i + 1) / point_number;
     ur_driver_->writeTrajectoryPoint(p, true, next_time - last_time);
