@@ -19,4 +19,5 @@
   <include file="$(find ur_robot_driver)/launch/ur_common.launch" pass_all_args="true">
     <arg name="use_tool_communication" value="false"/>
   </include>
+  <node name="ur10_ik" pkg="ur_ros_cartesian_control" type="ur10_ik" output="screen"/>
 </launch>
